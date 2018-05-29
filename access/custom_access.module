@@ -1,0 +1,259 @@
+<?php
+
+define('CUSTOM_ACCESS_REALM', 'custom_access_realm');
+define('CUSTOM_ACCESS_DENIED', 0);
+define('CUSTOM_ACCESS_PUBLIC', 1);
+define('CUSTOM_ACCESS_PRIVATE', 2);
+
+function custom_access_node_grants($account, $op) {
+    $uw = entity_metadata_wrapper('user', $account);
+    $cmid = $uw->getpropertyinfo()['field_company_link'] ? $uw->field_company_link->raw() : 'undefined'; // Компания
+    $roles = $account->roles;
+    $alarms = array();
+    if ($op == 'view' && $account->uid) {
+        if (isset($uw->field_sm_link->getpropertyinfo()['field_departments_link'])) {
+            $deps = $uw->field_sm_link->field_departments_link->raw();
+            if ($deps) {
+                foreach ($deps as $dep) {
+                    $dep_rid_alarms[] = 'portal-alarm-dep-' . $dep;
+                }
+            }
+        }
+        if (count($roles) > 1) {
+            foreach ($roles as $key => $role) {
+                if ($key > 1) $rid[] = $key;
+            }
+            $grants['portal-alarm-company-' . $cmid] = $rid;
+            $grants['portal-user-role'] = $rid;
+            $rid[] = 1;
+            foreach ($dep_rid_alarms as $al) {
+                $grants[$al] = $rid;
+            }
+        } else {
+            $r = key($roles);
+            if ($r > 1) {
+                $rid[] = $r;
+                $grants['portal-alarm-company-' . $cmid] = $rid;
+                $grants['portal-user-role'] = $rid;
+            }
+            if (count($dep_rid_alarms) > 0) {
+                foreach ($dep_rid_alarms as $al) {
+                    $grants[$al] = array(1);
+                }
+            }
+        }
+        $grants['forexample'] = array(
+            CUSTOM_ACCESS_PUBLIC,
+        );
+        $grants['portal-alarm-uid'] = array(
+            $account->uid,
+        );
+        return $grants;
+    }
+    
+    if ($op == 'update') {
+        $grants = array();
+        if (in_array('anonymous user', $account->roles)) {
+            return;
+        } else {
+            if (count($roles) > 1) {
+            foreach ($roles as $key => $role) {
+                    if ($key > 1) $rid[] = $key;
+                }
+                $grants['portal-alarm-company-' . $cmid] = $rid;
+            }
+            return $grants;
+        }
+    }
+}
+
+function custom_access_node_access_records($node) {
+    
+    
+    $nw = entity_metadata_wrapper('node', $node);
+    $cmid = $nw->author->field_company_link->raw(); // ID компании
+    $grants = array();
+    
+    if (!function_exists('portal_alarm_grants_view')) {
+        function portal_alarm_grants_view($grants, $cmid) {
+            
+            $grants[] = array(
+                'realm' => 'portal-alarm-company-' . $cmid,
+                'gid' => 2,
+                'grant_view' => 1,
+                'grant_update' => 0,
+                'grant_delete' => 0,
+                'priority' => 2,
+            );
+            return $grants;
+        }
+    }
+    if (!function_exists('portal_alarm_grants_role')) {
+        function portal_alarm_grants_role($grants, $role_name, $cmid) {
+            if ($role_name != 'authenticated user') {
+                $rid =  user_role_load_by_name($role_name)->rid;
+                $grants[] = array(
+                    'realm' => 'portal-alarm-company-' . $cmid,
+                    'gid' => $rid,
+                    'grant_view' => 1,
+                    'grant_update' => 1,
+                    'grant_delete' => 0,
+                    'priority' => 2,
+                );
+            }
+            return $grants;
+        }
+    }
+    if (!function_exists('portal_alarm_user_role')) {
+        function portal_alarm_user_role($grants, $roles) {
+            foreach ($roles as $role) {
+                $rid =  user_role_load_by_name($role)->rid;
+                $grants[] = array(
+                    'realm' => 'portal-user-role',
+                    'gid' => $rid,
+                    'grant_view' => 1,
+                    'grant_update' => 0,
+                    'grant_delete' => 0,
+                    'priority' => 2,
+                );
+            }
+            return $grants;
+        }
+    }
+    
+    if ($node->type == 'task') {
+        if ($node->field_privacy['und'][0]['value'] == 1) {
+            $grants[] = array(
+                'realm' => 'portal-alarm-uid',
+                'gid' => $nw->value()->uid,
+                'grant_view' => 1,
+                'grant_update' => 0,
+                'grant_delete' => 0,
+                'priority' => 2,
+            );
+            $grants[] = array(
+                'realm' => 'portal-alarm-uid',
+                'gid' => $nw->field_appointed_link[0]->value()->uid,
+                'grant_view' => 1,
+                'grant_update' => 0,
+                'grant_delete' => 0,
+                'priority' => 2,
+            );
+            $grants = portal_alarm_grants_role($grants, 'private_task_view', $cmid);
+        } else {
+            $grants = portal_alarm_grants_view($grants, $cmid);
+        }
+         
+    } elseif ($node->type == 'websystems') {
+        if ($node->field_ws_limit_access['und'][0]['value'] == 1) {
+            $grants = portal_alarm_grants_role($grants, 'websystem_vew', $cmid);
+        } else {
+            $grants = portal_alarm_grants_role($grants, 'websystem_vew', $cmid);
+            $grants = portal_alarm_grants_view($grants, $cmid);
+        }
+    } elseif ($node->type == 'works_instructions') {
+        $grant_update = empty($node->field_vendor_links['und']) ? false : true;
+        $deps = $nw->field_departments_link->raw();
+        if (!empty($node->field_sm_role['und'])) {
+            foreach ($node->field_sm_role['und'] as $data) {
+                $rid[] = user_role_load_by_name($data['value'])->rid;
+            }
+        } else {
+            $rid[] = 1;
+        }
+        foreach ($deps as $dep) {
+            foreach ($rid as $gid) {
+                $grants[] = array(
+                    'realm' => 'portal-alarm-dep-' . $dep,
+                    'gid' => $gid,
+                    'grant_view' => 1,
+                    'grant_update' => $grant_update ? 1 : 0,
+                    'grant_delete' => 0,
+                    'priority' => 2,
+                );
+            }
+        }
+        if ($grant_update) {
+            $grants = portal_alarm_grants_role($grants, 'instruction_vendor_editor', $cmid);
+        }
+        $grants = portal_alarm_grants_role($grants, 'instruction_editor', $cmid);
+    } elseif (in_array($node->type, array('sc_authorization', 'vendor', 'guaranty_docs_type', 'production_type'))) {
+        $grants = portal_alarm_grants_role($grants, 'vendor_editor', $cmid);
+        $grants = portal_alarm_grants_view($grants, $cmid);
+    } elseif ($node->type == 'staff_member') {
+        $grants = portal_alarm_grants_role($grants, 'user_editor', $cmid);
+        $grants = portal_alarm_grants_view($grants, $cmid);
+    } elseif ($node->type == 'news') {
+        $grants = portal_alarm_grants_role($grants, 'news_editor', $cmid);
+        $deps = $nw->field_dep_free_access_link->raw();
+        foreach ($deps as $dep) {
+            $grants[] = array(
+                'realm' => 'portal-alarm-dep-' . $dep,
+                'gid' => 1,
+                'grant_view' => 1,
+                'grant_update' => 0,
+                'grant_delete' => 0,
+                'priority' => 2,
+            );
+        }
+    } elseif ($node->type == 'control') {
+        $grants = portal_alarm_grants_role($grants, 'control_recenses', $cmid);
+        $grants = portal_alarm_grants_view($grants, $cmid);
+    } elseif ($node->type == 'contragent') {
+        $grants = portal_alarm_grants_role($grants, 'contragent_editor', $cmid);
+        $grants = portal_alarm_grants_view($grants, $cmid);
+    } elseif ($node->type == 'delivery_control') {
+        $grants = portal_alarm_grants_role($grants, 'contragent_editor', $cmid);
+        $grants = portal_alarm_grants_view($grants, $cmid);
+    } elseif (in_array($node->type, array('function', 'control_category', 'departments'))) {
+        $grants = portal_alarm_grants_role($grants, 'manage_portal', $cmid);
+        $grants = portal_alarm_grants_view($grants, $cmid);
+    } elseif ($node->type == 'instructions_categories') {
+        $grants = portal_alarm_grants_role($grants, 'instruction_vendor_editor', $cmid);
+        $grants = portal_alarm_grants_role($grants, 'instruction_editor', $cmid);
+        $grants = portal_alarm_grants_view($grants, $cmid);
+    } elseif ($node->type == 'company') {
+        $grants = portal_alarm_grants_role($grants, 'manage_portal', $cmid);
+    } elseif (in_array($node->type, array('delivery_control', 'contragent'))) {
+        $grants = portal_alarm_grants_role($grants, 'contragent_editor', $cmid);
+    } elseif ($node->type == 'page' && !empty($node->field_sm_role['und'])) {
+        foreach ($node->field_sm_role['und'] as $role) {
+            $roles[] = $role['value'];
+        }
+        $grants = portal_alarm_user_role($grants, $roles);
+    } elseif ($node->type == 'wish') {
+        $grants = portal_alarm_grants_role($grants, 'manage_portal', $cmid);
+        $deps = $nw->field_dep_free_access_link->raw();
+        foreach ($deps as $dep) {
+            $grants[] = array(
+                'realm' => 'portal-alarm-dep-' . $dep,
+                'gid' => 1,
+                'grant_view' => 1,
+                'grant_update' => 0,
+                'grant_delete' => 0,
+                'priority' => 2,
+            );
+        }
+    } else {
+        $grants = portal_alarm_grants_view($grants, $cmid);
+    }
+    
+    if (isset($nw->getpropertyinfo()['field_forexample']) && $nw->field_forexample->value()) {
+        $grants[] = array(
+            'realm' => 'forexample',
+            'gid' => CUSTOM_ACCESS_PUBLIC,
+            'grant_view' => 1,
+            'grant_update' => 0,
+            'grant_delete' => 0,
+            'priority' => 2,
+        );
+    }
+    
+    /**
+     * Даю права просмотра для авторизованных пользователей
+     */
+    
+    
+    
+    return $grants;
+}

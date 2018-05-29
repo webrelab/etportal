@@ -1,0 +1,158 @@
+<?php
+
+/**
+ * Реализация хука hook_comment_insert для обработки данных после создания комментария
+ */
+
+function custom_comment_comment_insert($comment) {
+    $mailto = portal_mailto_user_defined($comment);
+    $params = array(
+        'comment' => $comment
+    );
+    foreach ($mailto as $to) {
+        if (!drupal_mail('custom_mail', 'portal_notification', $to, language_default(), $params)) {
+            watchdog('portal_notification', t('Some trouble with sending mal. nid = @nid, uid = @uid'), array('@nid' => $node->nid, '@uid' => $uid));
+        };
+    }
+    subscribe_to_node($comment->nid, $comment->uid);
+    portal_mark_read($comment->nid, $comment->uid);
+    $flag = flag_get_flag('subscribe');
+    $flag->flag('flag', $comment->nid, user_load($comment->uid));
+    
+}
+
+/**
+ * Реализация хука hook_comment_presave
+ */
+
+function custom_comment_comment_presave($comment) {
+    if (($comment->node_type == 'comment_node_task' || $comment->node_type == 'comment_node_control') && !empty($comment->field_change_appointment['und'])) {
+        $nw = entity_metadata_wrapper('node', $comment->nid);
+        $ca = portal_get_user_name($nw->field_appointed_link[0]->field_user_link->raw()); //Получаем имя текущего ответственного
+        $naw = entity_metadata_wrapper('node', $comment->field_change_appointment['und'][0]['target_id']);
+        $na = portal_get_user_name($naw->field_user_link->raw());
+        $nw->field_appointed_link[0] = $comment->field_change_appointment['und'][0]['target_id'];
+        $change_text = '<div class="radius secondary label">Смена ответственного: ' . $ca . ' > ' . $na . '</div>';
+        subscribe_to_node($comment->nid, $naw->author->raw());
+        $flag = flag_get_flag('subscribe');
+        $flag->flag('flag', $comment->nid, user_load($naw->author->raw()));
+        if (empty($comment->comment_body['und'])) {
+            $comment->comment_body['und'][0]['format'] = 'full_html';
+            $comment->comment_body['und'][0]['value'] = $change_text;
+            $comment->comment_body['und'][0]['safe_value'] = $change_text;
+        } else {
+            $comment->comment_body['und'][0]['value'] .= $change_text;
+            if (isset($comment->comment_body['und'][0]['safe_value'])) {
+                $comment->comment_body['und'][0]['safe_value'] .= $change_text;
+            } else {
+                $comment->comment_body['und'][0]['safe_value'] = $change_text;
+            }
+        }
+        $nw->save();
+    }
+}
+
+/**
+ * Реализация хука hook_form_FORM_ID_alter для изменения формы комментария
+ */
+
+function custom_comment_form_comment_form_alter(&$form, &$form_state, $form_id) {
+    global $user;
+    $app = portal_get_uid_appointment($form['nid']['#value']);
+    $author = $form['#node']->uid;
+    $form['field_change_appointment']['#access'] = in_array($user->uid, array($app, $author)) || in_array('manage_portal', $user->roles);
+    $name = portal_get_user_name($user->uid);
+    $form['author']['_author']['#markup'] = $name;
+    $form['subject']['#access'] = FALSE;
+    $form['comment_body']['und'][0]['#title'] = NULL;
+    $parse = drupal_parse_url($_SERVER['REQUEST_URI']);
+    $op = explode('/', $parse['path']);
+    if ($op[1] == 'comment' && $form['#bundle'] != 'comment_node_news') {
+        $form['#submit'][] = 'custom_comment_redirect_action';
+    }
+}
+
+function custom_comment_redirect_action(&$form, &$form_state) {
+    $parse = drupal_parse_url($_SERVER['REQUEST_URI']);
+    unset($parse['path']);
+    unset($parse['fragment']);
+    unset($form_state['rebuild']);
+    unset($_GET['destination']);
+    unset($parse['query']['destination']);
+    unset($parse['query']['render']);
+    $form_state['redirect'] = url(str_replace('_', '-', $form['#node']->type) . '-list', $parse);
+}
+
+
+function custom_node_form_comment_node_task_form_alter(&$form, &$form_state, $form_id) {
+}
+
+
+function custom_comment_admin_paths_alter(&$paths) {
+    $paths['comment/reply*'] = TRUE;
+}
+/**
+ * Разрешаю удалять собственные комментарии
+ */
+
+function custom_comment_menu_alter(&$items) {
+    $items['comment/%/delete']['access arguments'] = array(1);
+    $items['comment/%/delete']['access callback'] = '_custom_comment_delete_callback';
+}
+
+function _custom_comment_delete_callback($cid) {
+    if (user_access('administer comments')) return TRUE;
+    global $user;
+    $comment = comment_load($cid);
+    return ($comment->uid == $user->uid);
+}
+
+function custom_comment_form_comment_confirm_delete_alter(&$form, &$form_state, $form_id) {
+    $form['description']['#markup'] = 'Это действие нельзя отменить.';
+}
+
+/**
+ * Функция возвращает массив адресов эл.почты, кому требуется отправить уведомление по подпискам. Функция требует комментарий
+ */
+
+function portal_mailto_user_defined($comment) {
+    $nid = $comment->nid;
+    $mailto = array();
+    $query = new EntityFieldQuery;
+    $query->entityCondition('entity_type', 'user')
+        ->fieldCondition('field_subscribed_content_link', 'target_id', $nid);
+    $result = $query->execute();
+    if ($result['user']) {
+        foreach ($result['user'] as $key => $uid) {
+            if ($key !== $comment->uid) {
+                $uw = entity_metadata_wrapper('user', $key);
+                if (!empty($uw->field_sm_link->field_subscribe_email->value()) && $uw->field_sm_link->field_subscribe_all_contents->value()) {
+                    $mailto[] = $uw->field_sm_link->field_subscribe_email->value();
+                }
+            }
+        }
+    }
+    return $mailto;
+}
+
+/**
+ * Функция возвращает общее содержание ноды и коммента
+ */
+
+function portal_comment_summary_record($comment) {
+    $nw = entity_metadata_wrapper('node', $comment->nid);
+    $author = 'Автор:' . portal_get_user_name($nw->author->raw());
+    $date = '';
+    if ($comment->node_type == 'comment_node_task') {
+        $date = $nw->field_task_date->value()[0];
+        $date = $date ? 'Срок выполнения:' . format_date($date, 'custom', 'd M') : '';
+    }
+    $text = $nw->field_text->value(array('sanitize' => TRUE))['value'];
+    $cautor = 'Автор комментария: ' . portal_get_user_name($comment->uid);
+    if (!empty($comment->comment_body['und'])) {
+        $ctext = 'Комментарий:<br>' . $comment->comment_body['und'][0]['value'];
+    } else {
+        $ctext = '';
+    }
+    return (implode('<br>', array($author, $date, $text, $cautor, $ctext)));
+}

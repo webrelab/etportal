@@ -1,0 +1,180 @@
+<?php
+
+function custom_mail_mail($key, &$message, $params) {
+    if (isset($params['node'])) {
+        $entity = $params['node'];
+        $type = $entity->type;
+        $subject_by_type = array(
+            'new' => array(
+                'task' => 'Добавлена задача',
+                'control' => 'Добавлена запись в контроль',
+                'news' => 'Добавлена новость',
+                'wish' => 'Добавлена запись в список желаний',
+            ),
+            'changed' => array(
+                'task' => array(
+                    'status' => 'Смена статуса задачи',
+                    'text' => 'Задача отредактирована',
+                    'appoint' => 'Смена ответственного в задаче'
+                ),
+                'control' => array(
+                    'status' => 'Смена статуса записи в контроле',
+                    'text' => 'Запись в контроль отредактирована',
+                    'appoint' => 'Смена ответственного в контроле'
+                ),
+                'news' => array(
+                    'text' => 'Новость отредактирована'
+                ),
+                'wish' => array(
+                    'status' => 'Смена статуса записи в списке желаний',
+                    'text' => 'Запись в списке желаний отредактирована'
+                ),
+            )
+        );
+        $message['subject'] = (isset($params['reason'])) ? $subject_by_type[$params['state']][$type][$params['reason']] : $subject_by_type[$params['state']][$type];
+        $node = $entity;
+        $task_date = $type == 'task' ? strtotime($node->field_task_date['und'][0]['value']) : '';
+        $task_date = $task_date ? ((date('Y', time()) == date('Y', $task_date)) ? format_date($task_date, 'custom', 'd M') : format_date($task_date, 'custom', 'd M Y')) : '';
+        $text = $node->field_text['und'][0]['value'];
+        if (isset($params['reason']) && $params['reason'] == 'status') {
+            if ($type == 'task') {
+                $status_names = array(
+                    '1' => 'Новая',
+                    '2' => 'В работе',
+                    '3' => 'Выполнена',
+                    '4' => 'Закрыта'
+                );
+                $status = $status_names[$node->field_task_status['und'][0]['value']];
+            } elseif ($type == 'control') {
+                $status = $node->field_control_close['und'][0]['value'] ? 'Закрыта' : 'Не закрыта';
+            } elseif ($type == 'wish') {
+                $status_names = array(
+                    'start' => 'На рассмотрении',
+                    'accepted' => 'Принято',
+                    'rejected' => 'Отклонено',
+                    'implemented' => 'Реализовано'
+                );
+                $status = $status_names[$node->field_wish_list_status['und'][0]['value']];
+            }
+        }
+        $status = isset($status) ? theme_html_tag(array(
+            'element' => array(
+                '#tag' => 'div',
+                '#value' => $status,
+                '#attributes' => array(
+                    'align' => 'left',
+                ),
+                '#value_prefix' => 'Новый статус: '
+            )
+        )) : '';
+        $status = isset($status) ? theme_html_tag(array(
+            'element' => array(
+                '#tag' => 'font',
+                '#value' => $status,
+                '#attributes' => array(
+                    'size' => '4',
+                ),
+            )
+        )) : '';
+        $task_date = $task_date ? theme_html_tag(array(
+            'element' => array(
+                '#tag' => 'div',
+                '#value' => $task_date,
+                '#attributes' => array(
+                    'align' => 'left',
+                ),
+                '#value_prefix' => 'Срок: '
+            )
+        )) : '';
+        $task_date = $task_date ? theme_html_tag(array(
+            'element' => array(
+                '#tag' => 'font',
+                '#value' => $task_date,
+                '#attributes' => array(
+                    'size' => '4',
+                ),
+            )
+        )) : '';
+    } else {
+        $entity = $params['comment'];
+        $type = '';
+        $message['subject'] = 'Добавлен новый комментарий';
+        $node = node_load($entity->nid);
+        $text = $entity->comment_body['und'][0]['value'];
+    }
+    $id = $node->field_node_id['und'][0]['value'];
+    $author = portal_get_user_name($entity->uid);
+    $author = theme_html_tag(array(
+        'element' => array(
+            '#tag' => 'div',
+            '#value' => $author,
+            '#attributes' => array(
+                'align' => 'left',
+            ),
+            '#value_prefix' => 'Автор: '
+        )
+    ));
+    $author = theme_html_tag(array(
+        'element' => array(
+            '#tag' => 'font',
+            '#value' => $author,
+            '#attributes' => array(
+                'size' => '4',
+            ),
+        )
+    ));
+    $id_type_name = array(
+        'comment_node_task' => 'задачи',
+        'comment_node_control' => 'записи в контроле',
+        'comment_node_news' => 'новости',
+        'comment_node_wish' => 'записи в списке желаний'
+    );
+    $id = theme_html_tag(array(
+        'element' => array(
+            '#tag' => 'div',
+            '#value' => $id,
+            '#attributes' => array(
+                'align' => 'left',
+            ),
+            '#value_prefix' => $type ? 'ID: ' : 'ID ' . $id_type_name[$entity->node_type] . ': ',
+        )
+    ));
+    $id = theme_html_tag(array(
+        'element' => array(
+            '#tag' => 'font',
+            '#value' => $id,
+            '#attributes' => array(
+                'size' => '4',
+            ),
+        )
+    ));
+    $text = theme_html_tag(array(
+        'element' => array(
+            '#tag' => 'div',
+            '#value' => $text,
+            '#attributes' => array(
+                'align' => 'left',
+            ),
+        )
+    ));
+    $text = theme_html_tag(array(
+        'element' => array(
+            '#tag' => 'font',
+            '#value' => $text,
+            '#attributes' => array(
+                'size' => '4',
+            ),
+        )
+    ));
+    $nw = entity_metadata_wrapper('node', $node);
+    $cm = $nw->author->field_company_link->value();
+    if ($cm->field_company_level['und'][0]['value'] == 'company') {
+        $cmname = $cm->field_company_name['und'][0]['value'];
+    } else {
+        $cm = 'Informen';
+    }
+    $cmname = $cmname . ' <уведомления>';
+    $message['headers']['Content-Type'] = 'text/html; charset=UTF-8; format=flowed; delsp=no';
+    $message['body'] = $type ? $author . $id . $task_date . $status . $text : $author . $id . $text;
+    $message['from_name'] = $cmname;
+}

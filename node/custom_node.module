@@ -1,0 +1,659 @@
+<?php
+/**
+ * Действия при изменении и добавлении материалов
+ */
+
+function custom_node_node_presave($node) {
+    
+    /**
+     * Добавление префикса в компанию
+     */
+    
+    if ($node->type == 'company' && $node->is_new) {
+        if (isset($node->field_company_prefix['und']) && empty($node->field_company_prefix['und'])) {
+            $node->field_company_prefix['und'][0]['value'] = portal_prefix_generator();
+        }
+        if (isset($node->field_company_counter['und']) && empty($node->field_company_counter['und'])) {
+            $node->field_company_counter['und'][0]['value'] = 0;
+        }
+    }
+    
+    /**
+     * Добавляю идентификаторы к материалам
+     */
+    if ($node->is_new && isset($node->field_node_id) && empty($node->field_node_id['und'])) {
+        $node->field_node_id['und'][0]['value'] = portal_node_ids_generator($node);
+    }
+    
+    if (in_array($node->type, array('control', 'news', 'wish')) || ($node->type == 'task' && count($node->field_appointed_link['und']) == 1)) {
+        if (!($node->is_new)) {
+            $reason = '';
+            if ($node->original->field_text['und'][0]['value'] != $node->field_text['und'][0]['value']) $reason = 'text';
+            if ($node->type == 'task' && $node->field_task_status['und'][0]['value'] != $node->original->field_task_status['und'][0]['value']) $reason = 'status';
+            if ($node->type == 'control' && $node->field_control_close['und'][0]['value'] != $node->original->field_control_close['und'][0]['value']) $reason = 'status';
+            if ($node->type == 'wish' && $node->field_wish_list_status['und'][0]['value'] != $node->original->field_wish_list_status['und'][0]['value']) $reason = 'status';
+            if (isset($node->field_appointed_link) && $node->field_appointed_link['und'][0]['target_id'] != $node->original->field_appointed_link['und'][0]['target_id']) $reason = 'appoint';
+            $params = $reason ? array(
+                'node' => $node,
+                'state' => 'changed',
+                'reason' => $reason
+            ) : '';
+            $recipients = array();
+            $query = new EntityFieldQuery;
+            $query->entityCondition('entity_type', 'user')
+                ->propertyCondition('status', 1)
+                ->fieldCondition('field_subscribed_content_link', 'target_id', $node->nid, '=');
+            $result = $query->execute();
+            if ($result['user'] && $reason) {
+                foreach ($result['user'] as $uid => $data) {
+                    if ($GLOBALS['user']->uid == $uid) continue;
+                    $uw = entity_metadata_wrapper('user', $uid);
+                    if (!empty($uw->field_sm_link->field_subscribe_email->value()) && $uw->field_sm_link->field_subscribe_all_contents) {
+                        $recipient = $uw->field_sm_link->field_subscribe_email->value();
+                        if (!drupal_mail('custom_mail', 'portal_notification', $recipient, language_default(), $params)) {
+                            watchdog('portal_notification', t('Some trouble with sending mal. nid = @nid, uid = @uid'), array('@nid' => $node->nid, '@uid' => $uid));
+                        }
+                    }
+                }
+            }
+        } else {
+            $params = array(
+                'node' => $node,
+                'state' => 'new'
+            );
+            $recipients = array();
+            $nw = entity_metadata_wrapper('node', $node);
+            if (in_array($node->type, array('task', 'control')) && count($node->field_appointed_link['und']) == 1) {
+                if ($nw->field_appointed_link[0]->field_subscribe_email->value() && $nw->field_appointed_link[0]->author->raw() != $GLOBALS['user']->uid)
+                {
+                    $recipients[] = $nw->field_appointed_link[0]->field_subscribe_email->value();
+                }
+            }
+            if (in_array($node->type, array('news', 'wish'))) {
+                $deps = $nw->field_dep_free_access_link->raw();
+                if (!empty($deps)) {
+                    foreach ($deps as $dep) {
+                        $query = new EntityFieldQuery;
+                        $query->entityCondition('entity_type', 'node')
+                            ->entityCondition('bundle', 'staff_member')
+                            ->propertyCondition('status', 1)
+                            ->fieldCondition('field_departments_link', 'target_id', $dep, '=');
+                        $result = $query->execute();
+                        if ($result['node']) {
+                            foreach ($result['node'] as $nid => $data) {
+                                $nw = entity_metadata_wrapper('node', $nid);
+                                if ($GLOBALS['user']->uid == $nw->author->getidentifier()) continue;
+                                if ($nw->field_subscribe_email->value()) {
+                                    $recipients[] = $nw->field_subscribe_email->value();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!empty($recipients)) {
+                foreach ($recipients as $recipient) {
+                    if (!drupal_mail('custom_mail', 'portal_notification', $recipient, language_default(), $params)) {
+                        watchdog('portal_notification', t('Some trouble with sending mal. nid = @nid, uid = @uid'), array('@nid' => $node->nid, '@uid' => $uid));
+                    }
+                }
+            }
+        }
+    }
+    
+    /**
+     * Запрет и разрешение комментирования новостей
+     */
+    
+    if ($node->type == 'news') {
+        if ($node->field_news_close_comment['und'][0]['value'] == 1) {
+            $node->comment = 1;
+        } else {
+            $node->comment = 2;
+        }
+    }
+    
+    if ($node->type == 'staff_member') {
+        if (!($node->is_new)) {
+            $nw = entity_metadata_wrapper('node', $node);
+            $ornw = entity_metadata_wrapper('node', $node->original);
+            $uw = entity_metadata_wrapper('user', $nw->field_user_link->raw());
+            if ($nw->field_sm_role->value() != $ornw->field_sm_role->value()) {
+                $accounts = array($nw->field_user_link->raw());
+                foreach ($uw->roles->value() as $key=>$rid) {
+                    if ($rid != 2) {
+                        user_multiple_role_edit($accounts, 'remove_role', $rid);
+                    }
+                }
+                foreach ($nw->field_sm_role->value() as $key=>$role) {
+                    $rid = user_role_load_by_name($role);
+                    user_multiple_role_edit($accounts, 'add_role', $rid->rid);
+                }
+            }
+        }
+    }
+    
+    /**
+     * Добавление задач для ознакомления с обновлёнными правилами
+     */
+    
+    if (!$node->is_new && $node->type == 'works_instructions') {
+        if ($node->field_instructions_task_add['und'][0]['value']) {
+            portal_add_instruction_tasks($node);
+        }
+        unset($node->field_instructions_task_add['und']);
+    }
+}
+
+/**
+ * Вывод страниц в оверлее
+ */
+
+function custom_node_admin_paths_alter(&$paths) {
+    $paths['portal/websystem/*'] = TRUE;
+    $paths['portal/instructions-for-vendor/*'] = TRUE;
+}
+
+/**
+ * Перенаправляю просмтор отдельных нод в таблицы, например вендоров, веб-системы, и прочую мелочь, для которых отдельные страницы не нужны.
+ */
+
+function custom_node_node_view_alter(&$build) {
+    $types = array(
+        'websystems',
+        'vendor',
+        'works_instructions',
+        'function',
+        'instructions_categories',
+        'control_category',
+        'contragent',
+        'departments',
+        'guaranty_docs_type',
+        'production_type',
+        'staff_member',
+        'sc_authorization',
+        'delivery_control'
+    );
+    if (in_array($build['#bundle'], $types) && $build['#view_mode'] == 'full') {
+        drupal_goto(str_replace('_', '-', $build['#bundle']) . '-list/' . $build['#node']->nid);
+    }
+    if ($build['#bundle'] == 'company' && $build['#view_mode'] == 'full') {
+        drupal_goto('my-portal');
+    }
+}
+
+/**
+ * Генерация задач в случае множества ответственных. Для каждого ответственного создаётся копия задачи, после чего первая - удаляется.
+ */
+
+function custom_node_node_insert($node) {
+    $nw = entity_metadata_wrapper('node', $node);
+    
+    if (in_array($node->type, array('task', 'control')) && (count($node->field_appointed_link['und'])>1)) {
+        foreach ($node->field_appointed_link['und'] as $item) {
+            $new = replicate_clone_entity('node', $node);
+            unset($new->field_appointed_link['und']);
+            $new->field_appointed_link['und'][0]['target_id'] = $item['target_id'];
+            $new->field_node_id['und'][0]['value'] = portal_node_ids_generator($node);
+            node_save($new);
+        }
+        node_delete($node->nid);
+    }
+    
+    /**
+     * Реализация повторения задач
+     */ 
+    
+    if ($node->type == 'task' && count($node->field_task_date['und']) > 1 && $node->field_task_repeate_schedule['und'][0]['value'] > 0 && count($node->field_appointed_link['und']) == 1) {
+        dsm('schedules');
+        $new_date = $node->field_task_date['und'][1]['value'];
+        $offset = $node->field_task_repeate_schedule['und'][0]['value'] * 24 * 60 * 60;
+        $start_time = strtotime($new_date) - $offset;
+        scheduled_tasks_add($start_time, 'repeat_task_clone_schedule', array($node->nid));
+    }
+    
+    /**
+     * Подписка на материалы
+     */
+    
+    if (in_array($node->type, array('task', 'control')) && ($nw->field_appointed_link->count() == 1)) {
+        $appoint = $nw->field_appointed_link[0]->field_user_link->raw();
+        subscribe_to_node($node->nid, $appoint);
+        subscribe_to_node($node->nid, $node->uid);        
+        $flag = flag_get_flag('subscribe');
+        $flag->flag('flag', $node->nid, user_load($node->uid));
+        $flag->flag('flag', $node->nid, user_load($appoint));
+        appoint_to_node($node->nid, $appoint);
+        authored_to_node($node->nid, $node->uid);
+        portal_mark_read($node->nid, $node->uid);
+    }
+    if (in_array($node->type, array('news', 'wish'))) {
+        subscribe_to_node($node->nid, $node->uid);
+        $flag = flag_get_flag('subscribe');
+        $flag->flag('flag', $node->nid, user_load($node->uid));
+        portal_mark_read($node->nid, $node->uid);
+        $deps = $nw->field_dep_free_access_link->raw();
+        if (!empty($deps)) {
+            foreach ($deps as $dep) {
+                $query = new EntityFieldQuery;
+                $query->entityCondition('entity_type', 'node')
+                    ->entityCondition('bundle', 'staff_member')
+                    ->propertyCondition('status', 1)
+                    ->fieldCondition('field_departments_link', 'target_id', $dep, '=');
+                $result = $query->execute();
+                if ($result['node']) {
+                    foreach ($result['node'] as $nid => $data) {
+                        $sm = node_load($nid);
+                        subscribe_to_node($node->nid, $sm->uid);
+                        $flag->flag('flag', $node->nid, user_load($sm->uid));
+                    }
+                }
+            }
+        }
+    }
+    
+    if ($node->type == 'staff_member') {
+        $uw = entity_metadata_wrapper('user', $node->uid);
+        $uw->field_sm_link->set($node->nid);
+        $uw->save();
+        
+    }
+    
+    if ($node->type == 'works_instructions') {
+        if ($node->field_instructions_task_add['und'][0]['value']) {
+            portal_add_instruction_tasks($node);
+        }
+        unset($node->field_instructions_task_add['und']);
+        field_attach_update('node', $node);
+    }
+}
+
+function portal_add_instruction_tasks($node) {
+    $deps = $node->field_departments_link['und'];
+    global $user;
+    foreach ($deps as $dep) {
+        $staff = array();
+        $query = new EntityFieldQuery;
+        $result = $query
+        ->entityCondition('entity_type', 'node')
+        ->entityCondition('bundle', 'staff_member')
+        ->fieldCondition('field_departments_link', 'target_id', $dep['target_id'])
+        ->execute();
+        if ($result['node']) {
+            foreach ($result['node'] as $staff => $data) {
+                $sw = entity_metadata_wrapper('node', $staff);
+                if (!empty($node->field_sm_role['und'])) {
+                    $roles = $sw->field_user_link->value()->roles;
+                    foreach ($node->field_sm_role['und'] as $data) {
+                        $role[] = $data['value'];
+                    }
+                    if (!array_intersect($roles,$role)) continue;
+                }
+                if ($sw->value()->uid == $node->uid) continue;
+                $task = entity_create('node', array('type' => 'task'));
+                $nw = entity_metadata_wrapper('node', $task);
+                $nw->title->set('Задача');
+                $nw->title_field->set('Задача');
+                $nw->field_text->set(array(
+                    'format' => 'full_html',
+                    'value' => 'Ознакомьтесь с изменениями в правилах по ссылке',
+                ));
+                $nw->field_appointed_link->set(array($staff));
+                $nw->author->set($node->uid);
+                $nw->field_task_date[0]->set(time() + 259200);
+                $nw->field_add_object->set($node->nid);
+                $id = portal_node_ids_generator($node);
+                $nw->field_node_id->set($id);
+                $nw->save();
+            }
+        }
+    }
+}
+
+function repeat_task_clone_schedule($params) {
+//     $w = var_dump($params);
+//     watchdog('clon entity w', $w);
+    watchdog('clon entity', $params);
+//     watchdog('test', 'test');
+    $old_node = node_load($params);
+    if ($old_node) {
+        object_log('cloned entity', $old_node);
+        $new_node = replicate_clone_entity('node', $old_node);
+        array_shift($new_node->field_task_date['und']);
+        $new_node->field_task_status['und'][0]['value'] = 1;
+        $id = portal_node_ids_generator($old_node);
+        $new_node->field_node_id['und'][0]['value'] = $id;
+        node_save($new_node);
+    } else {
+        watchdog('clone_entity', 'Node ' . $w . ' not loaded');
+    }
+    
+}
+
+/**
+ * Функция помечает задачу или контроль прочитанным для автора после создания, с целью не показывать новое содержимое
+ */
+
+function portal_mark_read($nid, $uid) {
+    if ($uid) {
+        db_merge('history')
+        ->key(array(
+            'uid' => $uid,
+            'nid' => $nid,
+        ))
+        ->fields(array('timestamp' => REQUEST_TIME+1))
+        ->execute();
+    }
+}
+
+
+function custom_node_form_alter(&$form, &$form_state, $form_id) {
+    $type = array(
+        'task',
+        'control',
+    );
+    if (isset($form['type']['#value'])) {
+        if (in_array($form['type']['#value'], $type)) {
+            $form['actions']['submit']['#submit'][] = 'custom_node_redirect_node_form_submit';
+        }
+    }
+    if ($form_id == 'staff_member_node_form' || $form_id == 'company_node_form') {
+        $form['#attached']['js'][] = array(
+            'data' => drupal_get_path('theme', 'et_admin') . '/js/jquery.suggestions.min.js',
+            'type' => 'file',
+            'scope' => 'footer',
+            'weight' => 11,
+        );
+        $form['#attached']['js'][] = array(
+            'data' => drupal_get_path('theme', 'et_admin') . '/js/dadata.js',
+            'type' => 'file',
+            'scope' => 'footer',
+            'weight' => 12,
+        );
+        $form['#attached']['css'][] = drupal_get_path('theme', 'et_admin') . '/css/suggestions.css';
+        if ($GLOBALS['user']->uid == $form['uid']['#value']) {
+            $form['field_sm_role']['und']['#after_build'][] = 'custom_node_manage_portal_checkbox_disable';
+        }
+    }
+    if ($form_id == 'task_node_form') {
+        $form['#attached']['js'][] = array(
+            'data' => drupal_get_path('module', 'custom_node') . '/task_repeate_schedule.js',
+            'type' => 'file',
+            'weight' => 11
+        );
+    }
+    if ($form_id == 'delivery_control_node_form') {
+        $form['#attached']['js'][] = array(
+            'data' => drupal_get_path('module', 'custom_node') . '/delivery_repair_fieldset.js',
+            'type' => 'file',
+            'weight' => 11
+        );
+    }
+    if (in_array($form_id, array('contragent_node_form', 'delivery_control_node_form'))) {
+        $form['actions']['submit']['#submit'][] = 'custom_node_redirect_to_all_node_form_submit';
+    }
+    if (isset($form['field_vendor_links']) && count($form['field_vendor_links']['und']['#options']) == 1) {
+        $form['field_vendor_links']['#access'] = false;
+    }
+}
+
+function custom_node_manage_portal_checkbox_disable($element, &$form_state) {
+    $element['manage_portal']['#prefix'] = '<div style="display: none;">';
+    $element['manage_portal']['#suffix'] = '</div>';
+    return $element;
+}
+
+function custom_node_redirect_node_form_submit($form, &$form_state) {
+    $form_state['redirect'] = str_replace('_', '-', $form['type']['#value']) . '-list';
+}
+
+function custom_node_redirect_to_all_node_form_submit($form, &$form_state) {
+    $form_state['redirect'] = str_replace('_', '-', $form['type']['#value']) . '-list/all';
+}
+
+/**
+ * Функция возвращает список nid сотрудников (staff_member) отдела по nid отдела
+ */
+
+function portal_get_staff_from_departments($nid) {
+    $staffs = array();
+    $query = new EntityFieldQuery;
+    $result = $query
+    ->entityCondition('entity_type', 'node')
+    ->entityCondition('bundle', 'staff_member')
+    ->fieldCondition('field_departments_link', 'target_id', $nid)
+    ->execute();
+    $staffs = array();
+    if ($result['node']) {
+        foreach ($result['node'] as $key => $item) {
+            $staffs[] = $key;
+        }
+    }
+    return $staffs;
+}
+
+/**
+ * Функция подписки на материалы
+ */
+
+function subscribe_to_node($nid, $uid) {
+    $uw = entity_metadata_wrapper('user', $uid);
+    $all_subscribes = $uw->field_subscribed_content_link->raw();
+    if (empty($all_subscribes)) {
+        $uw->field_subscribed_content_link->set(array($nid));
+        $uw->save();
+        return;
+    }
+    foreach ($all_subscribes as $key=>$item) {
+        if ($nid == $item) {
+            return;
+        }
+    }
+    $uw->field_subscribed_content_link[] = $nid;
+    $uw->save();
+}
+
+/**
+ * Функция записывает в учётку пользователя ноду, ответственным по которой он является
+ */
+
+function appoint_to_node($nid, $uid) {
+    $uw = entity_metadata_wrapper('user', $uid);
+    $all_appoints = $uw->field_appointed_content_link->raw();
+    if (empty($all_appoints)) {
+        $uw->field_appointed_content_link->set(array($nid));
+        $uw->save();
+        return;
+    }
+    foreach ($all_appoints as $key=>$item) {
+        if ($nid == $item) {
+            return;
+        }
+    }
+    $uw->field_appointed_content_link[] = $nid;
+    $uw->save();
+}
+
+/**
+ * Функция записывает в учётку пользователя ноду, автором которой он является
+ */
+
+function authored_to_node($nid, $uid) {
+    $uw = entity_metadata_wrapper('user', $uid);
+    $all_authoreds = $uw->field_autored_content_link->raw();
+    if (empty($all_authoreds)) {
+        $uw->field_autored_content_link->set(array($nid));
+        $uw->save();
+        return;
+    }
+    foreach ($all_authoreds as $key=>$item) {
+        if ($nid == $item) {
+            return;
+        }
+    }
+    $uw->field_autored_content_link[] = $nid;
+    $uw->save();
+}
+
+/**
+ * Функция возвращает общее содержание ноды
+ */
+
+function portal_node_summary_record($nid) {
+    $nw = entity_metadata_wrapper('node', $nid);
+    $title = ($nw->getBundle() == 'news') ? 'Заголовок: ' . $nw->label() : '';
+    $author = 'Автор: ' . portal_get_user_name($nw->author->raw());
+    $date = !empty($nw->getPropertyInfo()['field_task_date']) ? $nw->field_task_date->value()[0] : '';
+    $date = $date ? 'Срок выполнения: ' . format_date($date, 'custom', 'd M') : '';
+    $text = $nw->field_text->value(array('sanitize' => TRUE))['value'];
+    return (implode('<br>', array($author, $date, $title, $text)));
+}
+
+/**
+ * Функция возвращает полное ФИО пользователя с учётом галочки Показывать отчество
+ */
+
+function portal_get_user_name($uid) {
+    $uw = entity_metadata_wrapper('user', $uid);
+    if (isset($uw->field_sm_link->getpropertyinfo()['field_sm_name'])) {
+        $snd = $uw->field_sm_link->field_sm_display_secondname->validate(TRUE) ? $uw->field_sm_link->field_sm_display_secondname->value() : '';
+        $sn = $uw->field_sm_link->field_sm_secondname->value();
+        $sn = ($snd == 1) ? $sn : '';
+        $fn = $uw->field_sm_link->field_sm_name->value();
+        $ln = $uw->field_sm_link->field_sm_lastname->value();
+        $name = implode(' ', array($ln, $fn, $sn));
+        return $name;
+    }
+}
+
+/**
+ * Функция возвращает uid пользователя, который является ответственным в задаче или контроле
+ */
+
+function portal_get_uid_appointment($nid) {
+    $nw = entity_metadata_wrapper('node', $nid);
+    if (isset($nw->getpropertyinfo()['field_appointed_link'])) return $nw->field_appointed_link[0]->field_user_link->raw();
+}
+
+/**
+ * Функция возвращает название первого отдела после Предприятия по uid пользователя
+ */
+
+function portal_get_depname($uid) {
+    $uw = entity_metadata_wrapper('user', $uid);
+    if ($uw->field_sm_link->getpropertyinfo()['field_departments_link']) {
+        return (count($uw->field_sm_link->field_departments_link->raw()) > 1) ? $uw->field_sm_link->field_departments_link[1]->value()->title : '';
+    }
+}
+
+function custom_node_form_control_node_form_alter(&$form, &$form_state, $form_id) {
+    foreach ($form['field_control_category']['und']['#options'] as $key=>$item) {
+        if (is_int($key)) {
+            $nw = entity_metadata_wrapper('node', $key);
+            if ($nw->field_forexample->value()) {
+                unset($form['field_control_category']['und']['#options'][$key]);
+            }
+        }
+    }
+}
+
+/**
+ * Регистрация расписаний для крона
+ */
+
+function custom_node_cronapi($op, $job = NULL) {
+    
+    /**
+     * Отбор и смена статуса актуальности для документов
+     */
+    
+    $items['portal_obsolete_document_status'] = array(
+        'description' => t('This function change actuality status of company docs'),
+        'rule' => '1 */2 * * *',
+    );
+    
+    /**
+     * Отбор и смена статутсов задач с Выполнена на Закрыта
+     */
+    
+    $items['portal_task_status_complete_change'] = array(
+        'description' => t('This function change status of task from complete to close'),
+        'rule' => '1 */2 * * *',
+    );
+    
+    return $items;
+}
+
+function portal_obsolete_document_status() {
+    $query = new EntityFieldQuery();
+    $query->entityCondition('entity_type', 'node')
+        ->propertyCondition('status', NODE_PUBLISHED)
+        ->fieldCondition('field_doc_state', 'value', '1', '=');
+    $result = $query->execute();
+    if ($result['node']) {
+        foreach ($result['node'] as $nid => $data) {
+            $nw = entity_metadata_wrapper('node', $nid);
+            $obs_time = $nw->author->field_company_link->field_company_obsolete_period->value() * 2592000 + $nw->changed->value(); // Секунд в месяце
+            if ($obs_time < time()) {
+                $nw->field_doc_state->set(3);
+                $nw->save();
+            }
+        }
+    }
+}
+
+function portal_task_status_complete_change() {
+    $query = new EntityFieldQuery();
+    $query->entityCondition('entity_type', 'node')
+        ->entityCondition('bundle', 'task')
+        ->propertyCondition('status', NODE_PUBLISHED)
+        ->fieldCondition('field_task_status', 'value', '3', '=');
+    $result = $query->execute();
+    if ($result['node']) {
+        foreach ($result['node'] as $nid => $data) {
+            $nw = entity_metadata_wrapper('node', $nid);
+            $obs_time = 604800 + $nw->changed->value(); // Отсчитываю семь дней
+            if ($obs_time < time()) {
+                $nw->field_task_status->set(4);
+                $nw->save();
+            }
+        }
+    }
+}
+
+function portal_prefix_generator() {
+    $alph = array('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z');
+    for ($i=0; $i<3; $i+=1) {
+        if ($i > 0) {
+            while ($pref[$i-1] == $pref[$i] = $alph[rand(0,24)]);
+        } else {
+            $pref[$i] = $alph[rand(0,24)];
+        }
+    }
+    $prefix = implode('', $pref);
+    $query = new EntityFieldQuery();
+    $query->entityCondition('entity_type', 'node')
+        ->entityCondition('bundle', 'company')
+        ->propertyCondition('status', NODE_PUBLISHED)
+        ->fieldCondition('field_company_prefix', 'value', '$prefix', '=');
+    $result = $query->execute();
+    if ($result['node']) {
+        return portal_prefix_generator();
+    } else {
+        return $prefix;
+    }
+}
+
+function portal_node_ids_generator($node) {
+    if ($node->uid) {
+        $user = user_load($node->uid);
+        $uw = entity_metadata_wrapper('user', $user);
+        $count = $uw->field_company_link->field_company_counter->value();
+        $count += 1;
+        $prefix = $uw->field_company_link->field_company_prefix->value();
+        $id = $prefix . $count;
+        $uw->field_company_link->field_company_counter->set($count);
+        $uw->field_company_link->save();
+        return $id;
+    }
+}

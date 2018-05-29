@@ -1,0 +1,7 @@
+name = Custom Views Actions
+package = Custom modules
+core = 7.x
+files[] = custom_views_handler_filter_appointedfilter.inc
+files[] = custom_views_handler_filter_authorfilter.inc
+files[] = views_handler_current_url_field.inc
+files[] = custom_views_plugin_access_portal_view_access.inc

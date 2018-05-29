@@ -1,0 +1,109 @@
+<?php
+
+/**
+ * Реализуем hook_flag_flag() для обработки нажатия на ссылки флагов
+ */
+
+function custom_flag_flag_flag($flag, $content_id, $account, $flagging) {
+    $nw = entity_metadata_wrapper('node', $content_id);
+    $uw = entity_metadata_wrapper('user', $account);
+    if ($flag->name == 'into_processing') {
+        $nw->field_task_status->set(2);
+        $nw->save();
+    }
+    
+    if ($flag->name == 'task_complete') {
+       if ($nw->author->uid->value() == $account->uid || portal_get_uid_appointment($content_id) == $account->uid) {
+            $nw->field_task_status->set(3);
+            $nw->save();
+       } else {
+            $flag->flag('unflag', $content_id);
+            drupal_set_message('Вы не авторизованы для выполнения этого действия', 'error');
+       }
+    }
+    
+    if ($flag->name == 'task_close') {
+        $nw->field_task_status->set(4);
+        $nw->save();
+    }
+    
+    if ($flag->name == 'control_close') {
+        $nw->field_control_close->set(1);
+        $nw->save();
+    }
+    
+    if ($flag->name == 'subscribe') {
+        if (!empty($uw->field_subscribed_content_link->raw())) {
+            if (!(array_search($content_id, $uw->field_subscribed_content_link->raw()))){
+                $uw->field_subscribed_content_link[] = $content_id;
+                $uw->save();
+            }
+        }
+    }
+    
+    if ($flag->name == 'to_accepted') {
+        $nw->field_wish_list_status->set('accepted');
+        $nw->save();
+    }
+    
+    if ($flag->name == 'to_rejected') {
+        $nw->field_wish_list_status->set('rejected');
+        $nw->save();
+    }
+    
+    if ($flag->name == 'to_implemented') {
+        $nw->field_wish_list_status->set('implemented');
+        $nw->save();
+    }
+}
+
+/**
+ * Реализуем hook_flag_unflag() для обработки отмены флагов
+ */
+
+function custom_flag_flag_unflag($flag, $content_id, $account, $flagging) {
+    $nw = entity_metadata_wrapper('node', $content_id);
+    if ($flag->name == 'into_processing') {
+        $nw->field_task_status->set(1);
+        $nw->save();
+    }
+    
+    if ($flag->name == 'task_complete') {
+        $nw->field_task_status->set(2);
+        $nw->save();
+    }
+    
+    if ($flag->name == 'task_close') {
+        $nw->field_task_status->set(3);
+        $nw->save();
+    }
+    
+    if ($flag->name == 'control_close') {
+        $nw->field_control_close->set(0);
+        $nw->save();
+    }
+    
+    if ($flag->name == 'subscribe') {
+        $uw = entity_metadata_wrapper('user', $account);
+        if (!empty($uw->field_subscribed_content_link->raw())) {
+            $key = array_search($content_id, $uw->field_subscribed_content_link->raw());
+            $uw->field_subscribed_content_link->offsetUnset($key);
+            $uw->save();
+        }
+    }
+    
+    if ($flag->name == 'to_accepted') {
+        $nw->field_wish_list_status->set('start');
+        $nw->save();
+    }
+    
+    if ($flag->name == 'to_rejected') {
+        $nw->field_wish_list_status->set('start');
+        $nw->save();
+    }
+    
+    if ($flag->name == 'to_implemented') {
+        $nw->field_wish_list_status->set('accepted');
+        $nw->save();
+    }
+}
